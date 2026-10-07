@@ -33,3 +33,13 @@ steps:
     targetType: 'inline'
     script: 'npm run build'
  
+- task: CopyFilesOverSSH@0
+  displayName: 'Deploy dist to Azure VM'
+  inputs:
+    sshEndpoint: 'heartfelt-vm-ssh'
+    sourceFolder: '$(Build.SourcesDirectory)/dist'
+    contents: '**'
+    targetFolder: '/var/www/html'
+    cleanTargetFolder: true
+    overwrite: true
+    readyTimeout: '20000'
