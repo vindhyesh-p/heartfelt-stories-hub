@@ -1,0 +1,35 @@
+trigger:
+- main
+
+pool: devops-agent
+
+variables:
+  nodeVersion: '18.x'
+
+steps:
+- task: UseNode@1
+  displayName: 'Install Node.js'
+  inputs:
+    versionSource: 'spec'
+    version: '$(nodeVersion)'
+
+- task: PowerShell@2
+  displayName: 'Check Node and npm'
+  inputs:
+    targetType: 'inline'
+    script: |
+      node --version
+      npm --version
+
+- task: PowerShell@2
+  displayName: 'Install dependencies'
+  inputs:
+    targetType: 'inline'
+    script: 'npm ci'
+
+- task: PowerShell@2
+  displayName: 'Build application'
+  inputs:
+    targetType: 'inline'
+    script: 'npm run build'
+ 
