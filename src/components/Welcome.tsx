@@ -13,7 +13,7 @@ const Welcome = ({ onGetStarted }: WelcomeProps) => {
   const slides = [
     {
       icon: Heart,
-      title: "Welcome to SoulCircle",
+      title: "Welcome to SoulCircle - CI/CD TEST",
       description: "Connect with friends and family in a warm, meaningful way",
       color: "from-pink-400 to-red-400"
     },
