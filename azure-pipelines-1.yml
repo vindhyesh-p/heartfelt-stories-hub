@@ -28,7 +28,7 @@ stages:
               tags: $(Build.BuildId)
 
           # Scan image BEFORE pushing to ACR
-          - bash: |
+          - powershell: |
               set -euo pipefail
 
               IMAGE="$(imageRepository):$(Build.BuildId)"
@@ -40,7 +40,7 @@ stages:
             displayName: Trivy Image Security Scan
 
           # Scan Kubernetes manifests / configuration
-          - bash: |
+          - powershell: |
               set -euo pipefail
 
               trivy config --severity CRITICAL --exit-code 1 manifests/
@@ -90,7 +90,7 @@ stages:
                      containers: 'heartfeltacr12345.azurecr.io/heart-felt:$(Build.BuildId)'
 
                  # Verify application health after deployment
-                 - bash: |
+                 - powershell: |
                       set -euo pipefail
 
                       if [ -z "${SMOKE_TEST_URL:-}" ]; then
