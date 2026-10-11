@@ -3,7 +3,9 @@ pool: devops-agent
 trigger: none
 
 variables:
-
+  containerRegistry: 'heartfelt-acr'
+  imageRepository: 'heart-felt'
+  DockerfilePath: '**/Dockerfile'
 
 stages:
     - stage: BuildImage
@@ -14,4 +16,58 @@ stages:
         - job: BuildScanPush
           displayName: Build and Security Scan
           steps:
+          - checkout: self
+
+          - task: Docker@2
+            displayName: Docker Build
+            inputs:
+              containerRegistry: '$(containerRegistry)'
+              repository: '$(imageRepository)'
+              command: 'build'
+              Dockerfile: '$(DockerfilePath)'
+              tags: $(Build.BuildId)
+
+          # Scan image BEFORE pushing to ACR
+          - bash: |
+              set -euo pipefail
+
+              IMAGE="$(imageRepository):$(Build.BuildId)"
+
+              echo "Scanning Docker image: $IMAGE"
+
+              trivy image --scanners vuln,secret,license --severity CRITICAL --exit-code 1 "$IMAGE"
+
+            displayName: Trivy Image Security Scan
+
+          # Scan Kubernetes manifests / configuration
+          - bash: |
+              set -euo pipefail
+
+              trivy config --severity CRITICAL --exit-code 1 manifests/
+
+            displayName: Trivy Configuration Scan
+
+          # Push only after successful security scans
+          - task: Docker@2
+            displayName: Docker Push
+            inputs:
+              containerRegistry: '$(containerRegistry)'
+              repository: '$(imageRepository)'
+              command: 'push'
+              tags: $(Build.BuildId)
+
+    - stage: DeployToProd
+      displayName: Deploy and Test    
+      dependsOn: BuildImage
+      condition: succeeded()
+
+      jobs:
+        - deployment: DeployProd
+          displayName: Deploy Application to Prod
+
+
+
+
+
+
           
