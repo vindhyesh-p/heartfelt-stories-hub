@@ -3,7 +3,7 @@ pool: devops-agent
 trigger: none
 
 variables:
-  containerRegistry: 'heartfelt-acr'
+  containerRegistry: 'heartfeltacr12345'
   imageRepository: 'heart-felt'
   DockerfilePath: '**/Dockerfile'
 
@@ -56,16 +56,106 @@ stages:
               command: 'push'
               tags: $(Build.BuildId)
 
-    - stage: DeployToProd
-      displayName: Deploy and Test    
+# ==========================================
+# Stage 2: Deploy to Dev + Smoke Test
+# ==========================================
+
+    - stage: DeployToDev
+      displayName: Deploy Dev and Test  
       dependsOn: BuildImage
       condition: succeeded()
 
       jobs:
+        - deployment: DeployDev
+          displayName: Deploy Application to Dev
+          environment: 'heartfelt-dev'
+
+          strategy:
+           runOnce:
+             deploy:
+               steps:
+                 - checkout: self
+
+                 - task: KubernetesManifest@1
+                   displayName: Deploy Application
+                   inputs:
+                     action: 'deploy'
+                     connectionType: 'azureResourceManager'
+                     azureSubscriptionConnection: 'Subscription 1(e2ae98d7-8d18-48c7-9f27-a5aa26d3a904)'
+                     azureResourceGroup: 'heartfelt-rg'
+                     kubernetesCluster: 'heartfelt-aks'
+                     manifests: |
+                       manifests/deployment.yaml
+                       manifests/service.yaml
+                     containers: 'heartfeltacr12345.azurecr.io/heart-felt:$(Build.BuildId)'
+
+                 # Verify application health after deployment
+                 - bash: |
+                      set -euo pipefail
+
+                      if [ -z "${SMOKE_TEST_URL:-}" ]; then
+                        echo "ERROR: SMOKE_TEST_URL is not configured."
+                        exit 1
+                      fi
+
+                      echo "Testing application endpoint: $SMOKE_TEST_URL"
+
+                      for attempt in $(seq 1 12); do
+                        HTTP_CODE=$(curl \
+                          --silent \
+                          --output /dev/null \
+                          --write-out "%{http_code}" \
+                          --connect-timeout 5 \
+                          --max-time 10 \
+                          "$SMOKE_TEST_URL" || true)
+
+                        if [ "$HTTP_CODE" = "200" ]; then
+                          echo "Smoke test passed. HTTP $HTTP_CODE"
+                          exit 0
+                        fi
+
+                        echo "Attempt $attempt/12 failed. HTTP: ${HTTP_CODE:-no response}"
+                        sleep 10
+                      done
+
+                      echo "ERROR: Application health check failed."
+                      exit 1
+                   displayName: Dev HTTP Smoke Test
+                   env:
+                      SMOKE_TEST_URL: $(devSmokeTestUrl)
+
+# ==========================================
+# Stage 3: Deploy to Production
+# ==========================================
+
+    - stage: DeployProd
+      displayName: Deploy to Production
+      dependsOn: DeployDev
+      condition: succeeded()
+
+      jobs:
         - deployment: DeployProd
-          displayName: Deploy Application to Prod
+          displayName: Deploy to Production
+          environment: 'heartfelt-prod'
 
+          strategy:
+           runOnce:
+             deploy:
+               steps:
+                 - checkout: self
 
+                 - task: KubernetesManifest@1
+                   displayName: Deploy Application
+                   inputs:
+                     action: 'deploy'
+                     connectionType: 'azureResourceManager'
+                     azureSubscriptionConnection: 'Subscription 1(e2ae98d7-8d18-48c7-9f27-a5aa26d3a904)'
+                     azureResourceGroup: 'heartfelt-rg'
+                     kubernetesCluster: 'heartfelt-aks'
+                     manifests: |
+                       manifests/deployment.yaml
+                       manifests/service.yaml
+                     containers: 'heartfeltacr12345.azurecr.io/heart-felt:$(Build.BuildId)'
 
 
 
