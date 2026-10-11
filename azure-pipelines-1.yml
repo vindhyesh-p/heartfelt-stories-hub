@@ -3,7 +3,7 @@ pool: devops-agent
 trigger: none
 
 variables:
-  containerRegistry: 'heartfeltacr12345'
+  containerRegistry: 'heartfelt-acr'
   imageRepository: 'heart-felt'
   DockerfilePath: '**/Dockerfile'
 
@@ -85,8 +85,8 @@ stages:
                      azureResourceGroup: 'heartfelt-rg'
                      kubernetesCluster: 'heartfelt-aks'
                      manifests: |
-                       manifests/deployment.yaml
-                       manifests/service.yaml
+                       manifest/deployment.yaml
+                       manifest/service.yaml
                      containers: 'heartfeltacr12345.azurecr.io/heart-felt:$(Build.BuildId)'
 
                  # Verify application health after deployment
@@ -130,7 +130,7 @@ stages:
 
     - stage: DeployProd
       displayName: Deploy to Production
-      dependsOn: DeployDev
+      dependsOn: DeployToDev
       condition: succeeded()
 
       jobs:
@@ -153,8 +153,8 @@ stages:
                      azureResourceGroup: 'heartfelt-rg'
                      kubernetesCluster: 'heartfelt-aks'
                      manifests: |
-                       manifests/deployment.yaml
-                       manifests/service.yaml
+                       manifest/deployment.yaml
+                       manifest/service.yaml
                      containers: 'heartfeltacr12345.azurecr.io/heart-felt:$(Build.BuildId)'
 
 
