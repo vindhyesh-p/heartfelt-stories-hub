@@ -9,6 +9,8 @@ variables:
   imageRepository: 'heart-felt'
   imageTag: '$(Build.BuildId)'
   DockerfilePath: '**/Dockerfile'
+  Name:  devSmokeTestUrl
+  Value: http://20.116.138.218
 
   azureServiceConnection: 'devops-svc'
   azureResourceGroup: 'heartfelt-rg'
