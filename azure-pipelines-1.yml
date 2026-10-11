@@ -1,3 +1,4 @@
+
 pool: devops-agent
 
 trigger: none
@@ -34,18 +35,46 @@ stages:
       displayName: 'Checkout Source Code'
 
     # --------------------------------------
-    # Docker Build
+    # Login to ACR
     # --------------------------------------
 
     - task: Docker@2
-      displayName: 'Docker Build'
+      displayName: 'Login to ACR'
       inputs:
         containerRegistry: '$(containerRegistry)'
-        repository: '$(imageRepository)'
-        command: 'build'
-        Dockerfile: '$(DockerfilePath)'
-        tags: |
-          $(imageTag)
+        command: 'login'
+
+    # --------------------------------------
+    # Build and Push Multi-Platform Image
+    # --------------------------------------
+
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+
+        $IMAGE = "$(containerRegistryLoginServer)/$(imageRepository):$(imageTag)"
+
+        Write-Host "=========================================="
+        Write-Host "Building multi-platform Docker image"
+        Write-Host "$IMAGE"
+        Write-Host "=========================================="
+
+        docker buildx inspect --bootstrap
+
+        docker buildx build `
+          --platform linux/amd64,linux/arm64 `
+          -f "$(Build.SourcesDirectory)/Dockerfile" `
+          -t "$IMAGE" `
+          --push `
+          "$(Build.SourcesDirectory)"
+
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "Multi-platform Docker build failed."
+          exit $LASTEXITCODE
+        }
+
+        Write-Host "Multi-platform image build and push completed successfully."
+
+      displayName: 'Build and Push Multi-Platform Docker Image'
 
     # --------------------------------------
     # Trivy Image Security Scan
@@ -100,19 +129,6 @@ stages:
         Write-Host "Trivy configuration scan passed."
 
       displayName: 'Trivy Configuration Scan'
-
-    # --------------------------------------
-    # Push Image to ACR
-    # --------------------------------------
-
-    - task: Docker@2
-      displayName: 'Docker Push'
-      inputs:
-        containerRegistry: '$(containerRegistry)'
-        repository: '$(imageRepository)'
-        command: 'push'
-        tags: |
-          $(imageTag)
 
 
 # ==========================================
@@ -177,26 +193,20 @@ stages:
               for ($attempt = 1; $attempt -le 12; $attempt++) {
 
                 try {
-
                   $response = Invoke-WebRequest `
                     -Uri $env:SMOKE_TEST_URL `
                     -UseBasicParsing `
                     -TimeoutSec 10
 
                   $HTTP_CODE = $response.StatusCode
-
                 }
                 catch {
-
                   $HTTP_CODE = "No Response"
-
                 }
 
                 if ($HTTP_CODE -eq 200) {
-
                   Write-Host "Smoke test passed. HTTP $HTTP_CODE"
                   exit 0
-
                 }
 
                 Write-Host "Attempt $attempt/12 failed. HTTP: $HTTP_CODE"
