@@ -4,160 +4,255 @@ trigger: none
 
 variables:
   containerRegistry: 'heartfelt-acr'
+  containerRegistryLoginServer: 'heartfeltacr12345.azurecr.io'
   imageRepository: 'heart-felt'
+  imageTag: '$(Build.BuildId)'
   DockerfilePath: '**/Dockerfile'
 
+  azureServiceConnection: 'devops-svc'
+  azureResourceGroup: 'heartfelt-rg'
+  kubernetesCluster: 'heartfelt-aks'
+
 stages:
-    - stage: BuildImage
-      displayName: Build, Scan and Push Image
-      isSkippable: false
 
-      jobs:
-        - job: BuildScanPush
-          displayName: Build and Security Scan
-          steps:
-          - checkout: self
+# ==========================================
+# Stage 1: Build, Scan and Push
+# ==========================================
 
-          - task: Docker@2
-            displayName: Docker Build
-            inputs:
-              containerRegistry: '$(containerRegistry)'
-              repository: '$(imageRepository)'
-              command: 'build'
-              Dockerfile: '$(DockerfilePath)'
-              tags: $(Build.BuildId)
+- stage: BuildImage
+  displayName: 'Build, Scan and Push Image'
+  isSkippable: false
 
-          # Scan image BEFORE pushing to ACR
-          - powershell: |
-              set -euo pipefail
+  jobs:
 
-              IMAGE="$(imageRepository):$(Build.BuildId)"
+  - job: BuildScanPush
+    displayName: 'Build and Security Scan'
 
-              echo "Scanning Docker image: $IMAGE"
+    steps:
 
-              trivy image --scanners vuln,secret,license --severity CRITICAL --exit-code 1 "$IMAGE"
+    - checkout: self
+      displayName: 'Checkout Source Code'
 
-            displayName: Trivy Image Security Scan
+    # --------------------------------------
+    # Docker Build
+    # --------------------------------------
 
-          # Scan Kubernetes manifests / configuration
-          - powershell: |
-              set -euo pipefail
+    - task: Docker@2
+      displayName: 'Docker Build'
+      inputs:
+        containerRegistry: '$(containerRegistry)'
+        repository: '$(imageRepository)'
+        command: 'build'
+        Dockerfile: '$(DockerfilePath)'
+        tags: |
+          $(imageTag)
 
-              trivy config --severity CRITICAL --exit-code 1 manifests/
+    # --------------------------------------
+    # Trivy Image Security Scan
+    # --------------------------------------
 
-            displayName: Trivy Configuration Scan
+    - powershell: |
+        $ErrorActionPreference = "Stop"
 
-          # Push only after successful security scans
-          - task: Docker@2
-            displayName: Docker Push
-            inputs:
-              containerRegistry: '$(containerRegistry)'
-              repository: '$(imageRepository)'
-              command: 'push'
-              tags: $(Build.BuildId)
+        $IMAGE = "$(containerRegistryLoginServer)/$(imageRepository):$(imageTag)"
+
+        Write-Host "=========================================="
+        Write-Host "Scanning Docker image:"
+        Write-Host "$IMAGE"
+        Write-Host "=========================================="
+
+        trivy image `
+          --scanners vuln,secret,license `
+          --severity CRITICAL `
+          --exit-code 1 `
+          "$IMAGE"
+
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "Trivy image scan failed."
+          exit $LASTEXITCODE
+        }
+
+        Write-Host "Trivy image scan passed."
+
+      displayName: 'Trivy Image Security Scan'
+
+    # --------------------------------------
+    # Trivy Kubernetes Configuration Scan
+    # --------------------------------------
+
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+
+        Write-Host "=========================================="
+        Write-Host "Scanning Kubernetes manifests"
+        Write-Host "=========================================="
+
+        trivy config `
+          --severity CRITICAL `
+          --exit-code 1 `
+          "$(Build.SourcesDirectory)/manifest"
+
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "Trivy configuration scan failed."
+          exit $LASTEXITCODE
+        }
+
+        Write-Host "Trivy configuration scan passed."
+
+      displayName: 'Trivy Configuration Scan'
+
+    # --------------------------------------
+    # Push Image to ACR
+    # --------------------------------------
+
+    - task: Docker@2
+      displayName: 'Docker Push'
+      inputs:
+        containerRegistry: '$(containerRegistry)'
+        repository: '$(imageRepository)'
+        command: 'push'
+        tags: |
+          $(imageTag)
+
 
 # ==========================================
 # Stage 2: Deploy to Dev + Smoke Test
 # ==========================================
 
-    - stage: DeployToDev
-      displayName: Deploy Dev and Test  
-      dependsOn: BuildImage
-      condition: succeeded()
+- stage: DeployToDev
+  displayName: 'Deploy Dev and Test'
 
-      jobs:
-        - deployment: DeployDev
-          displayName: Deploy Application to Dev
-          environment: 'heartfelt-dev'
+  dependsOn: BuildImage
+  condition: succeeded()
 
-          strategy:
-           runOnce:
-             deploy:
-               steps:
-                 - checkout: self
+  jobs:
 
-                 - task: KubernetesManifest@1
-                   displayName: Deploy Application
-                   inputs:
-                     action: 'deploy'
-                     connectionType: 'azureResourceManager'
-                     azureSubscriptionConnection: 'Subscription 1(e2ae98d7-8d18-48c7-9f27-a5aa26d3a904)'
-                     azureResourceGroup: 'heartfelt-rg'
-                     kubernetesCluster: 'heartfelt-aks'
-                     manifests: |
-                       manifest/deployment.yaml
-                       manifest/service.yaml
-                     containers: 'heartfeltacr12345.azurecr.io/heart-felt:$(Build.BuildId)'
+  - deployment: DeployDev
+    displayName: 'Deploy Application to Dev'
 
-                 # Verify application health after deployment
-                 - powershell: |
-                      set -euo pipefail
+    environment: 'heartfelt-dev'
 
-                      if [ -z "${SMOKE_TEST_URL:-}" ]; then
-                        echo "ERROR: SMOKE_TEST_URL is not configured."
-                        exit 1
-                      fi
+    strategy:
+      runOnce:
+        deploy:
 
-                      echo "Testing application endpoint: $SMOKE_TEST_URL"
+          steps:
 
-                      for attempt in $(seq 1 12); do
-                        HTTP_CODE=$(curl \
-                          --silent \
-                          --output /dev/null \
-                          --write-out "%{http_code}" \
-                          --connect-timeout 5 \
-                          --max-time 10 \
-                          "$SMOKE_TEST_URL" || true)
+          - checkout: self
+            displayName: 'Checkout Kubernetes Manifests'
 
-                        if [ "$HTTP_CODE" = "200" ]; then
-                          echo "Smoke test passed. HTTP $HTTP_CODE"
-                          exit 0
-                        fi
+          # --------------------------------
+          # Deploy to AKS
+          # --------------------------------
 
-                        echo "Attempt $attempt/12 failed. HTTP: ${HTTP_CODE:-no response}"
-                        sleep 10
-                      done
+          - task: KubernetesManifest@1
+            displayName: 'Deploy Application to AKS'
+            inputs:
+              action: 'deploy'
+              connectionType: 'azureResourceManager'
+              azureSubscriptionConnection: '$(azureServiceConnection)'
+              azureResourceGroup: '$(azureResourceGroup)'
+              kubernetesCluster: '$(kubernetesCluster)'
+              manifests: |
+                manifest/deployment.yaml
+                manifest/service.yaml
+              containers: |
+                $(containerRegistryLoginServer)/$(imageRepository):$(imageTag)
 
-                      echo "ERROR: Application health check failed."
-                      exit 1
-                   displayName: Dev HTTP Smoke Test
-                   env:
-                      SMOKE_TEST_URL: $(devSmokeTestUrl)
+          # --------------------------------
+          # Verify Application Health
+          # --------------------------------
+
+          - powershell: |
+              $ErrorActionPreference = "Stop"
+
+              if ([string]::IsNullOrWhiteSpace($env:SMOKE_TEST_URL)) {
+                Write-Error "SMOKE_TEST_URL is not configured."
+                exit 1
+              }
+
+              Write-Host "Testing application endpoint:"
+              Write-Host "$env:SMOKE_TEST_URL"
+
+              for ($attempt = 1; $attempt -le 12; $attempt++) {
+
+                try {
+
+                  $response = Invoke-WebRequest `
+                    -Uri $env:SMOKE_TEST_URL `
+                    -UseBasicParsing `
+                    -TimeoutSec 10
+
+                  $HTTP_CODE = $response.StatusCode
+
+                }
+                catch {
+
+                  $HTTP_CODE = "No Response"
+
+                }
+
+                if ($HTTP_CODE -eq 200) {
+
+                  Write-Host "Smoke test passed. HTTP $HTTP_CODE"
+                  exit 0
+
+                }
+
+                Write-Host "Attempt $attempt/12 failed. HTTP: $HTTP_CODE"
+
+                Start-Sleep -Seconds 10
+              }
+
+              Write-Error "Application health check failed."
+              exit 1
+
+            displayName: 'Dev HTTP Smoke Test'
+
+            env:
+              SMOKE_TEST_URL: $(devSmokeTestUrl)
+
 
 # ==========================================
 # Stage 3: Deploy to Production
 # ==========================================
 
-    - stage: DeployProd
-      displayName: Deploy to Production
-      dependsOn: DeployToDev
-      condition: succeeded()
+- stage: DeployProd
+  displayName: 'Deploy to Production'
 
-      jobs:
-        - deployment: DeployProd
-          displayName: Deploy to Production
-          environment: 'heartfelt-prod'
+  dependsOn: DeployToDev
+  condition: succeeded()
 
-          strategy:
-           runOnce:
-             deploy:
-               steps:
-                 - checkout: self
+  jobs:
 
-                 - task: KubernetesManifest@1
-                   displayName: Deploy Application
-                   inputs:
-                     action: 'deploy'
-                     connectionType: 'azureResourceManager'
-                     azureSubscriptionConnection: 'Subscription 1(e2ae98d7-8d18-48c7-9f27-a5aa26d3a904)'
-                     azureResourceGroup: 'heartfelt-rg'
-                     kubernetesCluster: 'heartfelt-aks'
-                     manifests: |
-                       manifest/deployment.yaml
-                       manifest/service.yaml
-                     containers: 'heartfeltacr12345.azurecr.io/heart-felt:$(Build.BuildId)'
+  - deployment: DeployProd
+    displayName: 'Deploy Application to Production'
 
+    environment: 'heartfelt-prod'
 
+    strategy:
+      runOnce:
+        deploy:
 
+          steps:
 
-          
+          - checkout: self
+            displayName: 'Checkout Kubernetes Manifests'
+
+          # --------------------------------
+          # Deploy to AKS Production
+          # --------------------------------
+
+          - task: KubernetesManifest@1
+            displayName: 'Deploy Application to AKS'
+            inputs:
+              action: 'deploy'
+              connectionType: 'azureResourceManager'
+              azureSubscriptionConnection: '$(azureServiceConnection)'
+              azureResourceGroup: '$(azureResourceGroup)'
+              kubernetesCluster: '$(kubernetesCluster)'
+              manifests: |
+                manifest/deployment.yaml
+                manifest/service.yaml
+              containers: |
+                $(containerRegistryLoginServer)/$(imageRepository):$(imageTag)
