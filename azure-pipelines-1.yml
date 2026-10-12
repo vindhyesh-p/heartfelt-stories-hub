@@ -1,26 +1,46 @@
-
 pool: devops-agent
 
 trigger: none
 
 variables:
-  containerRegistry: 'heartfelt-acr'
-  containerRegistryLoginServer: 'heartfeltacr12345.azurecr.io'
-  imageRepository: 'heart-felt'
-  imageTag: '$(Build.BuildId)'
-  DockerfilePath: '**/Dockerfile'
+- group: heartfelt-gitops
 
-  azureServiceConnection: 'devops-svc'
-  azureResourceGroup: 'heartfelt-rg'
-  kubernetesCluster: 'heartfelt-aks'
-  
-  devSmokeTestUrl: 'http://20.116.138.218'
+- name: containerRegistry
+  value: 'heartfelt-acr'
+
+- name: containerRegistryLoginServer
+  value: 'heartfeltacr12345.azurecr.io'
+
+- name: imageRepository
+  value: 'heart-felt'
+
+- name: imageTag
+  value: '$(Build.BuildId)'
+
+- name: azureServiceConnection
+  value: 'devops-svc'
+
+- name: azureResourceGroup
+  value: 'heartfelt-rg'
+
+- name: kubernetesCluster
+  value: 'heartfelt-aks'
+
+- name: gitopsRepo
+  value: 'https://github.com/vindhyesh-p/heartfelt-stories-hub-gitops.git'
+
+- name: gitopsValuesFile
+  value: 'helm/heartfelt/values.yaml'
+
+- name: smokeTestUrl
+  value: 'http://20.116.138.218'
+
 
 stages:
 
-# ==========================================
-# Stage 1: Build, Scan and Push
-# ==========================================
+# ============================================================
+# STAGE 1 - BUILD, SCAN AND PUSH
+# ============================================================
 
 - stage: BuildImage
   displayName: 'Build, Scan and Push Image'
@@ -29,16 +49,17 @@ stages:
   jobs:
 
   - job: BuildScanPush
-    displayName: 'Build and Security Scan'
+    displayName: 'Build, Scan and Push Docker Image'
 
     steps:
 
     - checkout: self
-      displayName: 'Checkout Source Code'
+      displayName: 'Checkout Application Source'
 
-    # --------------------------------------
+
+    # --------------------------------------------------------
     # Login to ACR
-    # --------------------------------------
+    # --------------------------------------------------------
 
     - task: Docker@2
       displayName: 'Login to ACR'
@@ -46,18 +67,20 @@ stages:
         containerRegistry: '$(containerRegistry)'
         command: 'login'
 
-    # --------------------------------------
-    # Build and Push Multi-Platform Image
-    # --------------------------------------
+
+    # --------------------------------------------------------
+    # Build Multi-Platform Image
+    # --------------------------------------------------------
 
     - powershell: |
+
         $ErrorActionPreference = "Stop"
 
         $IMAGE = "$(containerRegistryLoginServer)/$(imageRepository):$(imageTag)"
 
         Write-Host "=========================================="
-        Write-Host "Building multi-platform Docker image"
-        Write-Host "$IMAGE"
+        Write-Host "Building Docker Image"
+        Write-Host "Image: $IMAGE"
         Write-Host "=========================================="
 
         docker buildx inspect --bootstrap
@@ -70,26 +93,27 @@ stages:
           "$(Build.SourcesDirectory)"
 
         if ($LASTEXITCODE -ne 0) {
-          Write-Error "Multi-platform Docker build failed."
-          exit $LASTEXITCODE
-        }
+          Write-Error "Docker image build/push failed."
+          exit $LASTEXITCODE }
 
-        Write-Host "Multi-platform image build and push completed successfully."
+        Write-Host "Docker image pushed successfully."
 
       displayName: 'Build and Push Multi-Platform Docker Image'
 
-    # --------------------------------------
-    # Trivy Image Security Scan
-    # --------------------------------------
+
+    # --------------------------------------------------------
+    # Trivy Image Scan
+    # --------------------------------------------------------
 
     - powershell: |
+
         $ErrorActionPreference = "Stop"
 
         $IMAGE = "$(containerRegistryLoginServer)/$(imageRepository):$(imageTag)"
 
         Write-Host "=========================================="
-        Write-Host "Scanning Docker image:"
-        Write-Host "$IMAGE"
+        Write-Host "Trivy Image Security Scan"
+        Write-Host "Image: $IMAGE"
         Write-Host "=========================================="
 
         trivy image `
@@ -100,171 +124,397 @@ stages:
 
         if ($LASTEXITCODE -ne 0) {
           Write-Error "Trivy image scan failed."
-          exit $LASTEXITCODE
-        }
+          exit $LASTEXITCODE }
 
         Write-Host "Trivy image scan passed."
 
       displayName: 'Trivy Image Security Scan'
 
-    # --------------------------------------
-    # Trivy Kubernetes Configuration Scan
-    # --------------------------------------
+
+    # --------------------------------------------------------
+    # Trivy Kubernetes Manifest Scan
+    # --------------------------------------------------------
 
     - powershell: |
+
         $ErrorActionPreference = "Stop"
 
         Write-Host "=========================================="
-        Write-Host "Scanning Kubernetes manifests"
+        Write-Host "Trivy Configuration Scan"
         Write-Host "=========================================="
 
-        trivy config `
-          --severity CRITICAL `
-          --exit-code 1 `
-          "$(Build.SourcesDirectory)/manifest"
+        if (Test-Path "$(Build.SourcesDirectory)/manifest") {
 
-        if ($LASTEXITCODE -ne 0) {
-          Write-Error "Trivy configuration scan failed."
-          exit $LASTEXITCODE
-        }
+          trivy config `
+            --severity CRITICAL `
+            --exit-code 1 `
+            "$(Build.SourcesDirectory)/manifest"
 
-        Write-Host "Trivy configuration scan passed."
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Trivy configuration scan failed."
+            exit $LASTEXITCODE }
+
+          Write-Host "Trivy configuration scan passed." }
+        else {
+
+          Write-Host "manifest directory not found."
+          Write-Host "Skipping legacy Kubernetes manifest scan." }
 
       displayName: 'Trivy Configuration Scan'
 
 
-# ==========================================
-# Stage 2: Deploy to Dev + Smoke Test
-# ==========================================
+# ============================================================
+# STAGE 2 - UPDATE GITOPS REPOSITORY
+# ============================================================
 
-- stage: DeployToDev
-  displayName: 'Deploy Dev and Test'
+- stage: UpdateGitOps
+  displayName: 'Update GitOps Repository'
 
   dependsOn: BuildImage
   condition: succeeded()
 
   jobs:
 
-  - deployment: DeployDev
-    displayName: 'Deploy Application to Dev'
-
-    environment: 'heartfelt-dev'
-
-    strategy:
-      runOnce:
-        deploy:
-
-          steps:
-
-          - checkout: self
-            displayName: 'Checkout Kubernetes Manifests'
-
-          # --------------------------------
-          # Deploy to AKS
-          # --------------------------------
-
-          - task: KubernetesManifest@1
-            displayName: 'Deploy Application to AKS'
-            inputs:
-              action: 'deploy'
-              connectionType: 'azureResourceManager'
-              azureSubscriptionConnection: '$(azureServiceConnection)'
-              azureResourceGroup: '$(azureResourceGroup)'
-              kubernetesCluster: '$(kubernetesCluster)'
-              manifests: |
-                manifest/deployment.yaml
-                manifest/service.yaml
-              containers: |
-                $(containerRegistryLoginServer)/$(imageRepository):$(imageTag)
-
-          # --------------------------------
-          # Verify Application Health
-          # --------------------------------
-
-          - powershell: |
-              $ErrorActionPreference = "Stop"
-
-              if ([string]::IsNullOrWhiteSpace($env:SMOKE_TEST_URL)) {
-                Write-Error "SMOKE_TEST_URL is not configured."
-                exit 1
-              }
-
-              Write-Host "Testing application endpoint:"
-              Write-Host "$env:SMOKE_TEST_URL"
-
-              for ($attempt = 1; $attempt -le 12; $attempt++) {
-
-                try {
-                  $response = Invoke-WebRequest `
-                    -Uri $env:SMOKE_TEST_URL `
-                    -UseBasicParsing `
-                    -TimeoutSec 10
-
-                  $HTTP_CODE = $response.StatusCode
-                }
-                catch {
-                  $HTTP_CODE = "No Response"
-                }
-
-                if ($HTTP_CODE -eq 200) {
-                  Write-Host "Smoke test passed. HTTP $HTTP_CODE"
-                  exit 0
-                }
-
-                Write-Host "Attempt $attempt/12 failed. HTTP: $HTTP_CODE"
-
-                Start-Sleep -Seconds 10
-              }
-
-              Write-Error "Application health check failed."
-              exit 1
-
-            displayName: 'Dev HTTP Smoke Test'
-
-            env:
-              SMOKE_TEST_URL: $(devSmokeTestUrl)
-
-
-# ==========================================
-# Stage 3: Deploy to Production
-# ==========================================
-
-- stage: DeployProd
-  displayName: 'Deploy to Production'
-
-  dependsOn: DeployToDev
-  condition: succeeded()
-
-  jobs:
-
-  - deployment: DeployProd
-    displayName: 'Deploy Application to Production'
+  - deployment: GitOpsDeployment
+    displayName: 'Update GitOps Image Tag'
 
     environment: 'heartfelt-prod'
 
     strategy:
+
       runOnce:
+
         deploy:
 
           steps:
 
-          - checkout: self
-            displayName: 'Checkout Kubernetes Manifests'
+          - checkout: none
+            displayName: 'Skip Application Repository Checkout'
 
-          # --------------------------------
-          # Deploy to AKS Production
-          # --------------------------------
 
-          - task: KubernetesManifest@1
-            displayName: 'Deploy Application to AKS'
-            inputs:
-              action: 'deploy'
-              connectionType: 'azureResourceManager'
-              azureSubscriptionConnection: '$(azureServiceConnection)'
-              azureResourceGroup: '$(azureResourceGroup)'
-              kubernetesCluster: '$(kubernetesCluster)'
-              manifests: |
-                manifest/deployment.yaml
-                manifest/service.yaml
-              containers: |
-                $(containerRegistryLoginServer)/$(imageRepository):$(imageTag)
+          # --------------------------------------------------
+          # Clone GitOps Repository
+          # --------------------------------------------------
+
+          - powershell: |
+
+              $ErrorActionPreference = "Stop"
+
+              Write-Host "=========================================="
+              Write-Host "Cloning GitOps Repository"
+              Write-Host "=========================================="
+
+              $gitopsDir = "$(Agent.TempDirectory)\heartfelt-stories-hub-gitops"
+
+              if (Test-Path $gitopsDir) {
+                Remove-Item -Recurse -Force $gitopsDir }
+
+              $authBytes = [System.Text.Encoding]::ASCII.GetBytes(
+                "x-access-token:$env:GITHUB_PAT"
+              )
+
+              $authToken = [Convert]::ToBase64String($authBytes)
+
+              $authHeader = "AUTHORIZATION: Basic $authToken"
+
+              git -c "http.extraheader=$authHeader" `
+                clone `
+                "$(gitopsRepo)" `
+                "$gitopsDir"
+
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "GitOps repository clone failed."
+                exit $LASTEXITCODE }
+
+              Write-Host "GitOps repository cloned successfully."
+
+            displayName: 'Clone GitOps Repository'
+
+            env:
+              GITHUB_PAT: $(GITHUB_PAT)
+
+
+          # --------------------------------------------------
+          # Update Image Tag
+          # --------------------------------------------------
+
+          - powershell: |
+
+              $ErrorActionPreference = "Stop"
+
+              $gitopsDir = "$(Agent.TempDirectory)\heartfelt-stories-hub-gitops"
+
+              $valuesFile = Join-Path `
+                $gitopsDir `
+                "$(gitopsValuesFile)"
+
+              Write-Host "=========================================="
+              Write-Host "Updating GitOps Image Tag"
+              Write-Host "=========================================="
+
+              Write-Host "Values file:"
+              Write-Host "$valuesFile"
+
+              if (-not (Test-Path $valuesFile)) {
+                Write-Error "GitOps values.yaml not found."
+                exit 1 }
+
+              $content = Get-Content `
+                $valuesFile `
+                -Raw
+
+              $newTag = "$(imageTag)"
+
+              $updatedContent = [regex]::Replace(
+                $content,
+                '(?m)^(\s*tag:\s*)"[^"]*"',
+                "`$1`"$newTag`""
+              )
+
+              if ($content -eq $updatedContent) {
+                Write-Error "Image tag was not updated. Check values.yaml format."
+                exit 1 }
+
+              $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+              [System.IO.File]::WriteAllText(
+                $valuesFile,
+                $updatedContent,
+                $utf8NoBom
+              )
+
+              Write-Host "Image tag updated to: $newTag"
+
+            displayName: 'Update Helm Image Tag'
+
+
+          # --------------------------------------------------
+          # Commit and Push GitOps Change
+          # --------------------------------------------------
+
+          - powershell: |
+
+              $ErrorActionPreference = "Stop"
+
+              $gitopsDir = "$(Agent.TempDirectory)\heartfelt-stories-hub-gitops"
+
+              Set-Location $gitopsDir
+
+              Write-Host "=========================================="
+              Write-Host "Git Configuration"
+              Write-Host "=========================================="
+
+              git config user.name "Azure DevOps"
+              git config user.email "azure-devops@heartfelt.local"
+
+              git add helm/heartfelt/values.yaml
+
+              $stagedFiles = git diff --cached --name-only
+
+              if ([string]::IsNullOrWhiteSpace($stagedFiles)) {
+
+                Write-Host "No GitOps changes detected."
+                Write-Host "Nothing to commit."
+
+                exit 0 }
+
+              git commit `
+                -m "Update Heartfelt image to $(imageTag)"
+
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "Git commit failed."
+                exit $LASTEXITCODE }
+
+              Write-Host "Git commit created successfully."
+
+              $authBytes = [System.Text.Encoding]::ASCII.GetBytes(
+                "x-access-token:$env:GITHUB_PAT"
+              )
+
+              $authToken = [Convert]::ToBase64String($authBytes)
+
+              $authHeader = "AUTHORIZATION: Basic $authToken"
+
+              git -c "http.extraheader=$authHeader" `
+                push origin main
+
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "GitOps push failed."
+                exit $LASTEXITCODE }
+
+              Write-Host "=========================================="
+              Write-Host "GitOps Repository Updated Successfully"
+              Write-Host "Image Tag: $(imageTag)"
+              Write-Host "=========================================="
+
+            displayName: 'Commit and Push GitOps Change'
+
+            env:
+              GITHUB_PAT: $(GITHUB_PAT)
+
+
+# ============================================================
+# STAGE 3 - VERIFY ARGO CD DEPLOYMENT
+# ============================================================
+
+- stage: VerifyDeployment
+  displayName: 'Verify Argo CD Deployment'
+
+  dependsOn: UpdateGitOps
+  condition: succeeded()
+
+  jobs:
+
+  - job: Verify
+    displayName: 'Verify GitOps Deployment'
+
+    steps:
+
+
+    # --------------------------------------------------------
+    # Get AKS Credentials
+    # --------------------------------------------------------
+
+    - task: AzureCLI@2
+      displayName: 'Connect to AKS for Verification'
+      inputs:
+        azureSubscription: '$(azureServiceConnection)'
+        scriptType: 'ps'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=========================================="
+          Write-Host "Getting AKS Credentials"
+          Write-Host "=========================================="
+
+          az aks get-credentials `
+            --resource-group "$(azureResourceGroup)" `
+            --name "$(kubernetesCluster)" `
+            --overwrite-existing
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to get AKS credentials."
+            exit $LASTEXITCODE }
+
+          Write-Host "AKS credentials configured."
+
+
+    # --------------------------------------------------------
+    # Wait for Argo CD Auto Sync
+    # --------------------------------------------------------
+
+    - powershell: |
+
+        $ErrorActionPreference = "Stop"
+
+        $expectedImage = "$(containerRegistryLoginServer)/$(imageRepository):$(imageTag)"
+
+        Write-Host "=========================================="
+        Write-Host "Waiting for Argo CD Auto-Sync"
+        Write-Host "Expected Image:"
+        Write-Host "$expectedImage"
+        Write-Host "=========================================="
+
+        $synced = $false
+
+        for ($attempt = 1; $attempt -le 30; $attempt++) {
+
+          Write-Host ""
+          Write-Host "Attempt $attempt/30"
+
+          $syncStatus = kubectl get application heartfelt `
+            -n argocd `
+            -o jsonpath="{.status.sync.status}"
+
+          $healthStatus = kubectl get application heartfelt `
+            -n argocd `
+            -o jsonpath="{.status.health.status}"
+
+          $currentImage = kubectl get deployment heartfelt-app `
+            -n default `
+            -o jsonpath="{.spec.template.spec.containers[0].image}"
+
+          Write-Host "Argo CD Sync   : $syncStatus"
+          Write-Host "Argo CD Health : $healthStatus"
+          Write-Host "AKS Image      : $currentImage"
+
+          if (
+            $syncStatus -eq "Synced" -and
+            $healthStatus -eq "Healthy" -and
+            $currentImage -eq $expectedImage
+          ) {
+
+            Write-Host ""
+            Write-Host "=========================================="
+            Write-Host "GitOps Deployment Successful"
+            Write-Host "=========================================="
+
+            $synced = $true
+            break }
+
+          Start-Sleep -Seconds 10 }
+
+        if (-not $synced) {
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "GitOps Deployment Verification Failed"
+          Write-Host "=========================================="
+
+          kubectl get application heartfelt -n argocd
+
+          kubectl get deployment heartfelt-app -n default
+
+          exit 1 }
+
+      displayName: 'Wait for Argo CD Sync'
+
+
+    # --------------------------------------------------------
+    # HTTP Smoke Test
+    # --------------------------------------------------------
+
+    - powershell: |
+
+        $ErrorActionPreference = "Stop"
+
+        Write-Host "=========================================="
+        Write-Host "Application HTTP Smoke Test"
+        Write-Host "=========================================="
+
+        $URL = "$(smokeTestUrl)"
+
+        for ($attempt = 1; $attempt -le 12; $attempt++) {
+
+          try {
+
+            $response = Invoke-WebRequest `
+              -Uri $URL `
+              -UseBasicParsing `
+              -TimeoutSec 10
+
+            $HTTP_CODE = $response.StatusCode }
+          catch {
+
+            $HTTP_CODE = "No Response" }
+
+          Write-Host "Attempt $attempt/12 - HTTP: $HTTP_CODE"
+
+          if ($HTTP_CODE -eq 200) {
+
+            Write-Host ""
+            Write-Host "=========================================="
+            Write-Host "Smoke Test Passed"
+            Write-Host "HTTP Status: 200"
+            Write-Host "=========================================="
+
+            exit 0 }
+
+          Start-Sleep -Seconds 10 }
+
+        Write-Error "Application HTTP smoke test failed."
+        exit 1
+
+      displayName: 'Application HTTP Smoke Test'
